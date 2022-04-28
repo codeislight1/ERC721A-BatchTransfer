@@ -280,6 +280,83 @@ contract ERC721A is Context, ERC165, IERC721A {
     }
 
     /**
+     * @dev See {IERC721A-batchTransferFrom}.
+     */
+    function batchTransferFrom(
+        address from,
+        address to,
+        uint256 lowerTokenId,
+        uint256 upperTokenId
+    ) public virtual override {
+        _batchTransfer(from, to, lowerTokenId, upperTokenId);
+    }
+
+    /**
+     * @dev See {IERC721A-safeBatchTransferFrom}.
+     */
+    function safeBatchTransferFrom(
+        address from,
+        address to,
+        uint256 lowerTokenId,
+        uint256 upperTokenId
+    ) public virtual override {
+        safeBatchTransferFrom(from, to, lowerTokenId, upperTokenId, '');
+    }
+
+    /**
+     * @dev See {IERC721A-safeBatchTransferFrom}.
+     */
+    function safeBatchTransferFrom(
+        address from,
+        address to,
+        uint256 lowerTokenId,
+        uint256 upperTokenId,
+        bytes memory _data
+    ) public virtual override {
+        _batchTransfer(from, to, lowerTokenId, upperTokenId);
+        if (to.isContract() && !_checkContractOnERC721Received(from, to, lowerTokenId, _data)) {
+            revert TransferToNonERC721ReceiverImplementer();
+        }
+    }
+
+    /**
+     * @dev See {IERC721A-isBatchTransferable}.
+     */
+    function isBatchTransferable(
+        address from,
+        address to,
+        uint256 lowerTokenId,
+        uint256 upperTokenId
+    ) public view virtual override returns (bool) {
+        if (upperTokenId <= lowerTokenId) return false;
+        if (_startTokenId() > lowerTokenId || upperTokenId >= _currentIndex) return false;
+
+        TokenOwnership memory prevOwnership = _ownershipOf(lowerTokenId);
+        if (prevOwnership.addr != from) return false;
+
+        bool isApprovedOrOwner = (_msgSender() == from ||
+            isApprovedForAll(from, _msgSender()) ||
+            getApproved(lowerTokenId) == _msgSender());
+
+        if (!isApprovedOrOwner) return false;
+        if (to == address(0)) return false;
+
+        unchecked {
+            uint256 curr = upperTokenId;
+            TokenOwnership memory ownership = _ownerships[curr];
+            while (true) {
+                if (ownership.addr != address(0)) return false;                
+                curr--;
+                if (curr == lowerTokenId) break;
+                ownership = _ownerships[curr];
+            }
+
+            address _lowerTokenIdOwner = ownership.addr;
+            return (_lowerTokenIdOwner == address(0) || _lowerTokenIdOwner == prevOwnership.addr);
+        }
+    }
+
+    /**
      * @dev Returns whether `tokenId` exists.
      *
      * Tokens can be managed by their owner or approved accounts via {approve} or {setApprovalForAll}.
@@ -448,6 +525,78 @@ contract ERC721A is Context, ERC165, IERC721A {
 
         emit Transfer(from, to, tokenId);
         _afterTokenTransfers(from, to, tokenId, 1);
+    }
+
+    /**
+     * @dev Transfers [`lowerTokenId`, `upperTokenId`] from `from` to `to`.
+     *
+     * Requirements:
+     * - `to` cannot be the zero address.
+     * - `lowerTokenId` token must be owned by `from`.
+     * - `upperTokenId` token must be owned by `from`.
+     * - `upperTokenId` token must be greater than `lowerTokenId`.
+     *
+     * Emits multiple {Transfer} event.
+     */
+    function _batchTransfer(
+        address from,
+        address to,
+        uint256 lowerTokenId,
+        uint256 upperTokenId
+    ) private {
+        if (upperTokenId <= lowerTokenId) revert BatchTransferFromNonConsecutiveToken();
+        if (_startTokenId() > lowerTokenId || upperTokenId >= _currentIndex) revert QueryForNonexistentToken();
+
+        TokenOwnership memory prevOwnership = _ownershipOf(lowerTokenId);
+        if (prevOwnership.addr != from) revert BatchTransferFromIncorrectOwner();
+
+        bool isApprovedOrOwner = (_msgSender() == from ||
+            isApprovedForAll(from, _msgSender()) ||
+            getApproved(lowerTokenId) == _msgSender());
+
+        if (!isApprovedOrOwner) revert TransferCallerNotOwnerNorApproved();
+        if (to == address(0)) revert TransferToZeroAddress();
+
+        uint256 quantity = upperTokenId + 1 - lowerTokenId;
+
+        _beforeTokenTransfers(from, to, lowerTokenId, quantity);
+
+        unchecked {
+            _addressData[from].balance -= uint64(quantity);
+            _addressData[to].balance += uint64(quantity);
+            uint256 curr = upperTokenId;
+            TokenOwnership memory ownership = _ownerships[curr];
+            while (true) {
+                if (ownership.addr != address(0)) revert BatchTransferFromIncorrectOwner();
+                // Clear approvals from the previous owner
+                if (_tokenApprovals[curr] != address(0)) _approve(address(0), curr, from);
+                emit Transfer(from, to, curr);
+                curr--;
+                if (curr == lowerTokenId) break;
+                ownership = _ownerships[curr];
+            }
+
+            // If the ownership slot of tokenId+1 is not explicitly set, that means the transfer initiator owns it.
+            // Set the slot of tokenId+1 explicitly in storage to maintain correctness for ownerOf(tokenId+1) calls.
+            uint256 nextUpperTokenId = upperTokenId + 1;
+            TokenOwnership storage upperNextSlot = _ownerships[nextUpperTokenId];
+            if (upperNextSlot.addr == address(0)) {
+                if (nextUpperTokenId != _currentIndex) {
+                    upperNextSlot.addr = from;
+                    upperNextSlot.startTimestamp = prevOwnership.startTimestamp;
+                }
+            }
+            address _lowerTokenIdOwner = ownership.addr;
+            // at the end check the lowerTokenId either owned by address(0) or prevOwner
+            if (_lowerTokenIdOwner == address(0) || _lowerTokenIdOwner == prevOwnership.addr) {
+                TokenOwnership storage lowerSlot = _ownerships[curr];
+                lowerSlot.addr = to;
+                lowerSlot.startTimestamp = uint64(block.timestamp);
+                if (_tokenApprovals[curr] != address(0)) _approve(address(0), curr, from);
+                emit Transfer(from, to, curr);
+            } else revert BatchTransferFromIncorrectOwner();
+        }
+        _afterTokenTransfers(from, to, lowerTokenId, quantity);
     }
 
     /**
