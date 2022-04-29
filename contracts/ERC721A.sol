@@ -142,7 +142,7 @@ contract ERC721A is Context, ERC165, IERC721A {
             if (_startTokenId() <= curr && curr < _currentIndex) {
                 TokenOwnership memory ownership = _ownerships[curr];
                 if (!ownership.burned) {
-                    if (ownership.addr != address(0)) {
+                    if (ownership.addr > address(0)) {
                         return ownership;
                     }
                     // Invariant:
@@ -152,7 +152,7 @@ contract ERC721A is Context, ERC165, IERC721A {
                     while (true) {
                         curr--;
                         ownership = _ownerships[curr];
-                        if (ownership.addr != address(0)) {
+                        if (ownership.addr > address(0)) {
                             return ownership;
                         }
                     }
@@ -190,7 +190,7 @@ contract ERC721A is Context, ERC165, IERC721A {
         if (!_exists(tokenId)) revert URIQueryForNonexistentToken();
 
         string memory baseURI = _baseURI();
-        return bytes(baseURI).length != 0 ? string(abi.encodePacked(baseURI, tokenId.toString())) : '';
+        return bytes(baseURI).length > 0 ? string(abi.encodePacked(baseURI, tokenId.toString())) : '';
     }
 
     /**
@@ -345,7 +345,7 @@ contract ERC721A is Context, ERC165, IERC721A {
             uint256 curr = upperTokenId;
             TokenOwnership memory ownership = _ownerships[curr];
             while (true) {
-                if (ownership.addr != address(0)) return false;                
+                if (ownership.addr > address(0)) return false;
                 curr--;
                 if (curr == lowerTokenId) break;
                 ownership = _ownerships[curr];
@@ -415,13 +415,13 @@ contract ERC721A is Context, ERC165, IERC721A {
                     if (!_checkContractOnERC721Received(address(0), to, updatedIndex++, _data)) {
                         revert TransferToNonERC721ReceiverImplementer();
                     }
-                } while (updatedIndex != end);
+                } while (updatedIndex < end);
                 // Reentrancy protection
                 if (_currentIndex != startTokenId) revert();
             } else {
                 do {
                     emit Transfer(address(0), to, updatedIndex++);
-                } while (updatedIndex != end);
+                } while (updatedIndex < end);
             }
             _currentIndex = updatedIndex;
         }
@@ -460,7 +460,7 @@ contract ERC721A is Context, ERC165, IERC721A {
 
             do {
                 emit Transfer(address(0), to, updatedIndex++);
-            } while (updatedIndex != end);
+            } while (updatedIndex < end);
 
             _currentIndex = updatedIndex;
         }
@@ -486,9 +486,11 @@ contract ERC721A is Context, ERC165, IERC721A {
 
         if (prevOwnership.addr != from) revert TransferFromIncorrectOwner();
 
+        address ApprovedAddress = getApproved(tokenId);
+
         bool isApprovedOrOwner = (_msgSender() == from ||
             isApprovedForAll(from, _msgSender()) ||
-            getApproved(tokenId) == _msgSender());
+            ApprovedAddress == _msgSender());
 
         if (!isApprovedOrOwner) revert TransferCallerNotOwnerNorApproved();
         if (to == address(0)) revert TransferToZeroAddress();
@@ -496,7 +498,7 @@ contract ERC721A is Context, ERC165, IERC721A {
         _beforeTokenTransfers(from, to, tokenId, 1);
 
         // Clear approvals from the previous owner
-        _approve(address(0), tokenId, from);
+        if(ApprovedAddress > address(0)) _approve(address(0), tokenId, from);
 
         // Underflow of the sender's balance is impossible because we check for
         // ownership above and the recipient's balance can't realistically overflow.
@@ -516,7 +518,7 @@ contract ERC721A is Context, ERC165, IERC721A {
             if (nextSlot.addr == address(0)) {
                 // This will suffice for checking _exists(nextTokenId),
                 // as a burned slot cannot contain the zero address.
-                if (nextTokenId != _currentIndex) {
+                if (nextTokenId < _currentIndex) {
                     nextSlot.addr = from;
                     nextSlot.startTimestamp = prevOwnership.startTimestamp;
                 }
@@ -547,12 +549,16 @@ contract ERC721A is Context, ERC165, IERC721A {
         if (upperTokenId <= lowerTokenId) revert BatchTransferFromNonConsecutiveToken();
         if (_startTokenId() > lowerTokenId || upperTokenId >= _currentIndex) revert QueryForNonexistentToken();
 
-        TokenOwnership memory prevOwnership = _ownershipOf(lowerTokenId);
-        if (prevOwnership.addr != from) revert BatchTransferFromIncorrectOwner();
+        // previous ownership
+        TokenOwnership memory ownership = _ownershipOf(lowerTokenId);
+        if (ownership.addr != from) revert BatchTransferFromIncorrectOwner();
+
+        // range valididty already checked
+        address ApprovedAddress = _tokenApprovals[lowerTokenId];
 
         bool isApprovedOrOwner = (_msgSender() == from ||
             isApprovedForAll(from, _msgSender()) ||
-            getApproved(lowerTokenId) == _msgSender());
+            ApprovedAddress == _msgSender());
 
         if (!isApprovedOrOwner) revert TransferCallerNotOwnerNorApproved();
         if (to == address(0)) revert TransferToZeroAddress();
@@ -565,15 +571,16 @@ contract ERC721A is Context, ERC165, IERC721A {
             _addressData[from].balance -= uint64(quantity);
             _addressData[to].balance += uint64(quantity);
             uint256 curr = upperTokenId;
-            TokenOwnership memory ownership = _ownerships[curr];
+            ownership = _ownerships[curr];
             while (true) {
-                if (ownership.addr != address(0)) revert BatchTransferFromIncorrectOwner();
-                // Clear approvals from the previous owner
-                if (_tokenApprovals[curr] != address(0)) _approve(address(0), curr, from);
+                // checking for zero address which can't receive nor be burnt to.
+                if (ownership.addr > address(0)) revert BatchTransferFromIncorrectOwner();
+                // Check and clear approvals from the previous owner
+                if (_tokenApprovals[curr] > address(0)) _approve(address(0), curr, from);
                 emit Transfer(from, to, curr);
                 curr--;
-                if (curr == lowerTokenId) break;
                 ownership = _ownerships[curr];
+                if (curr == lowerTokenId) break;
             }
 
             // If the ownership slot of tokenId+1 is not explicitly set, that means the transfer initiator owns it.
@@ -581,20 +588,18 @@ contract ERC721A is Context, ERC165, IERC721A {
             uint256 nextUpperTokenId = upperTokenId + 1;
             TokenOwnership storage upperNextSlot = _ownerships[nextUpperTokenId];
             if (upperNextSlot.addr == address(0)) {
-                if (nextUpperTokenId != _currentIndex) {
+                if (nextUpperTokenId < _currentIndex) {
                     upperNextSlot.addr = from;
-                    upperNextSlot.startTimestamp = prevOwnership.startTimestamp;
+                    upperNextSlot.startTimestamp = ownership.startTimestamp;
                 }
             }
-            address _lowerTokenIdOwner = ownership.addr;
-            // at the end check the lowerTokenId either owned by address(0) or prevOwner
-            if (_lowerTokenIdOwner == address(0) || _lowerTokenIdOwner == prevOwnership.addr) {
-                TokenOwnership storage lowerSlot = _ownerships[curr];
-                lowerSlot.addr = to;
-                lowerSlot.startTimestamp = uint64(block.timestamp);
-                if (_tokenApprovals[curr] != address(0)) _approve(address(0), curr, from);
-                emit Transfer(from, to, curr);
-            } else revert BatchTransferFromIncorrectOwner();
+
+            // update the lowerTokenId ownership
+            TokenOwnership storage lowerSlot = _ownerships[curr];
+            lowerSlot.addr = to;
+            lowerSlot.startTimestamp = uint64(block.timestamp);
+            if (ApprovedAddress > address(0)) _approve(address(0), curr, from);
+            emit Transfer(from, to, curr);
         }
         _afterTokenTransfers(from, to, lowerTokenId, quantity);
     }
@@ -621,10 +626,12 @@ contract ERC721A is Context, ERC165, IERC721A {
 
         address from = prevOwnership.addr;
 
+        address ApprovedAddress = getApproved(tokenId);
+
         if (approvalCheck) {
             bool isApprovedOrOwner = (_msgSender() == from ||
                 isApprovedForAll(from, _msgSender()) ||
-                getApproved(tokenId) == _msgSender());
+                ApprovedAddress == _msgSender());
 
             if (!isApprovedOrOwner) revert TransferCallerNotOwnerNorApproved();
         }
@@ -632,7 +639,7 @@ contract ERC721A is Context, ERC165, IERC721A {
         _beforeTokenTransfers(from, address(0), tokenId, 1);
 
         // Clear approvals from the previous owner
-        _approve(address(0), tokenId, from);
+        if(ApprovedAddress > address(0)) _approve(address(0), tokenId, from);
 
         // Underflow of the sender's balance is impossible because we check for
         // ownership above and the recipient's balance can't realistically overflow.
@@ -655,7 +662,7 @@ contract ERC721A is Context, ERC165, IERC721A {
             if (nextSlot.addr == address(0)) {
                 // This will suffice for checking _exists(nextTokenId),
                 // as a burned slot cannot contain the zero address.
-                if (nextTokenId != _currentIndex) {
+                if (nextTokenId > _currentIndex) {
                     nextSlot.addr = from;
                     nextSlot.startTimestamp = prevOwnership.startTimestamp;
                 }
